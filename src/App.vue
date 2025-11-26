@@ -28,6 +28,7 @@ import {
 	Search,
 	LogOut,
 	Lock,
+	RefreshCcw,
 } from "lucide";
 
 // --- SWEETALERT2 IMPORTS ---
@@ -36,7 +37,7 @@ import "sweetalert2/dist/sweetalert2.min.css";
 
 // --- FIREBASE IMPORTS ---
 import { initializeApp } from "firebase/app";
-import { getAuth, signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged } from "firebase/auth"; // CAMBIO: Google Auth
+import { getAuth, signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged } from "firebase/auth";
 import {
 	getFirestore,
 	collection,
@@ -165,7 +166,6 @@ onMounted(() => {
 	});
 });
 
-// NUEVO: Función de Login con Google Mejorada
 const handleLogin = async () => {
 	const provider = new GoogleAuthProvider();
 	try {
@@ -174,13 +174,10 @@ const handleLogin = async () => {
 	} catch (error) {
 		console.error("Error Login:", error);
 		let msg = "Error al conectar con Google";
-
-		// Manejo de errores comunes
 		if (error.code === "auth/popup-closed-by-user") msg = "Ventana cerrada antes de terminar";
 		if (error.code === "auth/cancelled-popup-request") msg = "Solicitud cancelada";
 		if (error.code === "auth/popup-blocked") msg = "El navegador bloqueó la ventana (permite popups)";
 		if (error.code === "auth/unauthorized-domain") msg = "⚠️ Dominio no autorizado en Firebase Console";
-
 		showSnackbar(msg, "error");
 	}
 };
@@ -195,6 +192,11 @@ const handleLogout = async () => {
 	} catch (e) {
 		console.error(e);
 	}
+};
+
+// NUEVO: Función de recarga manual
+const handleRefresh = () => {
+	window.location.reload();
 };
 
 const initDataListeners = (userId) => {
@@ -243,7 +245,7 @@ watch(targetBuyRate, async (newVal) => {
 	} catch (e) {}
 });
 
-// --- COMPUTED PROPERTIES (Igual que antes) ---
+// --- COMPUTED PROPERTIES ---
 const mxnAccounts = computed(() => accounts.value.filter((a) => a.type === "MXN"));
 const usdtAccounts = computed(() => accounts.value.filter((a) => a.type === "USDT"));
 const sortedCounterparties = computed(() => [...counterparties.value].sort((a, b) => a.name.localeCompare(b.name)));
@@ -337,7 +339,7 @@ const groupedPending = computed(() => {
 	return Object.values(groups).sort((a, b) => b.totalUsdt - a.totalUsdt);
 });
 
-// --- LOGIC ACTIONS (Resumido para brevedad, misma lógica que versión anterior) ---
+// --- LOGIC ACTIONS ---
 const handleAccountSubmit = async () => {
 	if (!user.value) return;
 	try {
@@ -810,6 +812,7 @@ const renderIcons = () =>
 				Search,
 				LogOut,
 				Lock,
+				RefreshCcw,
 			},
 			attrs: { class: "w-5 h-5" },
 		})
@@ -922,6 +925,13 @@ const getBadgeColor = (type) =>
 							<i data-lucide="settings" class="w-4 h-4"></i> <span class="hidden sm:inline">Catálogos</span>
 						</button>
 						<div class="w-px h-6 bg-slate-700 mx-1"></div>
+						<button
+							@click="handleRefresh"
+							class="text-emerald-400 hover:text-emerald-300 p-2 animate-pulse"
+							title="Sincronizar Datos"
+						>
+							<i data-lucide="refresh-ccw" class="w-5 h-5"></i>
+						</button>
 						<button @click="handleLogout" class="text-slate-400 hover:text-red-400 p-2" title="Cerrar Sesión">
 							<i data-lucide="log-out" class="w-5 h-5"></i>
 						</button>
@@ -1292,22 +1302,20 @@ const getBadgeColor = (type) =>
 							<label class="text-xs font-bold text-gray-500 uppercase">Método de Salida</label>
 							<div class="grid grid-cols-2 gap-4">
 								<label
-									class="flex items-center gap-2 border rounded-lg p-2 cursor-pointer hover:bg-gray-50"
+									class="flex flex-col items-center justify-center gap-1 border rounded-lg p-2 cursor-pointer hover:bg-gray-50"
 									:class="{ 'border-indigo-500 bg-indigo-50': form.paymentMethod === 'transfer' }"
 								>
-									<input type="radio" value="transfer" v-model="form.paymentMethod" class="text-indigo-600" />
-									<div class="flex items-center gap-2 text-xs sm:text-sm font-medium text-gray-700">
-										<i data-lucide="arrow-up-right" class="w-4 h-4"></i> Transferencia
-									</div>
+									<input type="radio" value="transfer" v-model="form.paymentMethod" class="hidden" />
+									<i data-lucide="arrow-up-right" class="w-5 h-5 text-indigo-600"></i>
+									<span class="text-xs font-medium text-gray-700">Transferencia</span>
 								</label>
 								<label
-									class="flex items-center gap-2 border rounded-lg p-2 cursor-pointer hover:bg-gray-50"
+									class="flex flex-col items-center justify-center gap-1 border rounded-lg p-2 cursor-pointer hover:bg-gray-50"
 									:class="{ 'border-red-500 bg-red-50': form.paymentMethod === 'cash_withdrawal' }"
 								>
-									<input type="radio" value="cash_withdrawal" v-model="form.paymentMethod" class="text-red-600" />
-									<div class="flex items-center gap-2 text-xs sm:text-sm font-medium text-gray-700">
-										<i data-lucide="smartphone" class="w-4 h-4"></i> Retiro Efectivo
-									</div>
+									<input type="radio" value="cash_withdrawal" v-model="form.paymentMethod" class="hidden" />
+									<i data-lucide="smartphone" class="w-5 h-5 text-red-600"></i>
+									<span class="text-xs font-medium text-gray-700">Retiro Efectivo</span>
 								</label>
 							</div>
 						</div>

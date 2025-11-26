@@ -866,7 +866,7 @@ const getBadgeColor = (type) =>
 						>
 							P2P
 						</div>
-						<span class="font-bold text-lg tracking-tight hidden md:block">Control Capital Cloud</span>
+						<span class="font-bold text-base tracking-tight ml-2">Control Capital</span>
 					</div>
 					<div class="flex gap-2 text-sm overflow-x-auto items-center no-scrollbar">
 						<button
@@ -1296,7 +1296,7 @@ const getBadgeColor = (type) =>
 									:class="{ 'border-indigo-500 bg-indigo-50': form.paymentMethod === 'transfer' }"
 								>
 									<input type="radio" value="transfer" v-model="form.paymentMethod" class="text-indigo-600" />
-									<div class="flex items-center gap-2 text-sm font-medium text-gray-700">
+									<div class="flex items-center gap-2 text-xs sm:text-sm font-medium text-gray-700">
 										<i data-lucide="arrow-up-right" class="w-4 h-4"></i> Transferencia
 									</div>
 								</label>
@@ -1305,7 +1305,7 @@ const getBadgeColor = (type) =>
 									:class="{ 'border-red-500 bg-red-50': form.paymentMethod === 'cash_withdrawal' }"
 								>
 									<input type="radio" value="cash_withdrawal" v-model="form.paymentMethod" class="text-red-600" />
-									<div class="flex items-center gap-2 text-sm font-medium text-gray-700">
+									<div class="flex items-center gap-2 text-xs sm:text-sm font-medium text-gray-700">
 										<i data-lucide="smartphone" class="w-4 h-4"></i> Retiro Efectivo
 									</div>
 								</label>
@@ -1619,8 +1619,8 @@ const getBadgeColor = (type) =>
 								Agrega aquí tus clientes o proveedores frecuentes. Puedes establecer un <strong>TC Hoy</strong> para
 								agilizar la captura.
 							</p>
-							<form @submit.prevent="handleCounterpartySubmit" class="flex gap-4 mb-6 items-end">
-								<div class="flex-1">
+							<form @submit.prevent="handleCounterpartySubmit" class="flex flex-col sm:flex-row gap-4 mb-6 items-end">
+								<div class="w-full sm:flex-1">
 									<input
 										v-model="counterpartyForm.name"
 										type="text"
@@ -1629,7 +1629,7 @@ const getBadgeColor = (type) =>
 										required
 									/>
 								</div>
-								<div class="w-32">
+								<div class="w-full sm:w-32">
 									<input
 										v-model="counterpartyForm.dailyRate"
 										type="number"
@@ -1640,7 +1640,7 @@ const getBadgeColor = (type) =>
 								</div>
 								<button
 									type="submit"
-									class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-6 rounded-lg"
+									class="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-6 rounded-lg"
 								>
 									Agregar
 								</button>

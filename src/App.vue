@@ -29,6 +29,7 @@ import {
 	LogOut,
 	Lock,
 	RefreshCcw,
+	Bell,
 } from "lucide";
 
 // --- SWEETALERT2 IMPORTS ---
@@ -74,6 +75,7 @@ const envConfig = {
 	measurementId: getEnv("VITE_FIREBASE_MEASUREMENT_ID"),
 };
 
+// Configuración manual de respaldo
 const manualConfig = {
 	apiKey: "TU_API_KEY_AQUI",
 	authDomain: "TU_PROYECTO.firebaseapp.com",
@@ -111,7 +113,7 @@ const targetBuyRate = ref(19.5);
 
 const snackbar = ref({ show: false, message: "", type: "success" });
 
-// ... (Mismos estados de formularios que antes) ...
+// Estado Formulario Operaciones
 const isEditing = ref(false);
 const editingId = ref(null);
 const form = ref({
@@ -175,7 +177,6 @@ const handleLogin = async () => {
 		console.error("Error Login:", error);
 		let msg = "Error al conectar con Google";
 		if (error.code === "auth/popup-closed-by-user") msg = "Ventana cerrada antes de terminar";
-		if (error.code === "auth/cancelled-popup-request") msg = "Solicitud cancelada";
 		if (error.code === "auth/popup-blocked") msg = "El navegador bloqueó la ventana (permite popups)";
 		if (error.code === "auth/unauthorized-domain") msg = "⚠️ Dominio no autorizado en Firebase Console";
 		showSnackbar(msg, "error");
@@ -194,7 +195,6 @@ const handleLogout = async () => {
 	}
 };
 
-// NUEVO: Función de recarga manual
 const handleRefresh = () => {
 	window.location.reload();
 };
@@ -316,12 +316,16 @@ const dailyProfit = computed(() => {
 	return totalEquity.value - lastEquity - todayFunding + todayExpenses;
 });
 
+const pendingCharges = computed(() => {
+	return transactions.value.filter((t) => t.status === "pending" && t.type === "service_charge");
+});
+
 const groupedPending = computed(() => {
 	const pending = transactions.value.filter((t) => t.status === "pending");
 	const groups = {};
 	pending.forEach((tx) => {
 		const key = `${tx.counterparty}-${tx.type}`;
-		if (!groups[key])
+		if (!groups[key]) {
 			groups[key] = {
 				id: key,
 				counterparty: tx.counterparty,
@@ -330,11 +334,19 @@ const groupedPending = computed(() => {
 				totalUsdt: 0,
 				totalMxn: 0,
 				transactions: [],
+				primaryCurrency: "USDT",
 			};
+		}
 		groups[key].count++;
 		groups[key].totalUsdt += parseFloat(tx.amountUsdt) || 0;
 		groups[key].totalMxn += parseFloat(tx.amountMxn) || 0;
 		groups[key].transactions.push(tx);
+
+		if (groups[key].totalUsdt === 0 && groups[key].totalMxn > 0) {
+			groups[key].primaryCurrency = "MXN";
+		} else {
+			groups[key].primaryCurrency = "USDT";
+		}
 	});
 	return Object.values(groups).sort((a, b) => b.totalUsdt - a.totalUsdt);
 });
@@ -428,6 +440,23 @@ const applyBalanceEffect = async (tx, reverse = false) => {
 		if (tx.destinationBankId) await updateAccountBalance(tx.destinationBankId, tx.amountMxn, destOp);
 		return;
 	}
+
+	// COBROS EXTRA (Service Charge)
+	if (tx.type === "service_charge") {
+		if (tx.status === "completed") {
+			// Al completar un cobro, recibimos dinero -> SUMA
+			// Si revertimos (borramos), -> RESTA
+			const op = reverse ? "subtract" : "add";
+			if (tx.amountMxn > 0 && tx.bankId) {
+				await updateAccountBalance(tx.bankId, tx.amountMxn, op);
+			} else if (tx.amountUsdt > 0 && tx.platform) {
+				const w = findUsdtAccountByName(tx.platform);
+				if (w) await updateAccountBalance(w.id, tx.amountUsdt, op);
+			}
+		}
+		return;
+	}
+
 	let mxnSign = 0;
 	if (tx.type === "buy" || tx.type === "withdrawal") mxnSign = -1;
 	if (tx.type === "sell" || tx.type === "deposit") mxnSign = 1;
@@ -449,8 +478,12 @@ const applyBalanceEffect = async (tx, reverse = false) => {
 
 const handleTransactionSubmit = async () => {
 	if (!user.value) return;
+
+	// Validación Wallet USDT
 	if (
-		(form.value.type === "buy" || form.value.type === "sell") &&
+		(form.value.type === "buy" ||
+			form.value.type === "sell" ||
+			(form.value.type === "service_charge" && form.value.platform)) &&
 		form.value.platform &&
 		!findUsdtAccountByName(form.value.platform)
 	) {
@@ -475,6 +508,9 @@ const handleTransactionSubmit = async () => {
 		form.value.counterparty = finalCp;
 	}
 
+	let initialStatus = form.value.isPending ? "pending" : "completed";
+	if (form.value.type === "service_charge") initialStatus = "pending"; // Servicios nacen pendientes
+
 	if (isEditing.value && editingId.value) {
 		const oldTx = transactions.value.find((t) => t.id === editingId.value);
 		if (oldTx) await applyBalanceEffect(oldTx, true);
@@ -483,9 +519,9 @@ const handleTransactionSubmit = async () => {
 	const txData = {
 		...form.value,
 		amountMxn: parseFloat(form.value.amountMxn) || 0,
-		rate: form.value.type === "transfer_own" ? 0 : parseFloat(form.value.rate),
+		rate: form.value.type === "transfer_own" || form.value.type === "service_charge" ? 0 : parseFloat(form.value.rate),
 		amountUsdt: form.value.type === "transfer_own" ? 0 : parseFloat(form.value.amountUsdt),
-		status: form.value.isPending ? "pending" : "completed",
+		status: initialStatus,
 		commissionPercent: parseFloat(form.value.commissionPercent || 0),
 		timestamp: Date.now(),
 	};
@@ -609,6 +645,18 @@ const confirmSinglePending = async (tx) => {
 		if (tx.type === "sell") usdtSign = -1;
 		const w = findUsdtAccountByName(tx.platform);
 		if (usdtSign !== 0 && w) await updateAccountBalance(w.id, tx.amountUsdt, usdtSign === 1 ? "add" : "subtract");
+
+		if (tx.type === "service_charge") {
+			if (tx.amountMxn > 0 && tx.bankId) {
+				// Completar cobro MXN -> Sumar a Banco
+				await updateAccountBalance(tx.bankId, tx.amountMxn, "add");
+			} else if (tx.amountUsdt > 0 && tx.platform) {
+				const wService = findUsdtAccountByName(tx.platform);
+				// Completar cobro USDT -> Sumar a Wallet
+				if (wService) await updateAccountBalance(wService.id, tx.amountUsdt, "add");
+			}
+		}
+
 		await updateDoc(doc(db, "artifacts", appId, "users", user.value.uid, "transactions", tx.id), {
 			status: "completed",
 		});
@@ -634,55 +682,91 @@ const confirmGroup = async (group) => {
 		} catch (e) {}
 	}
 };
+
+// NUEVO: Confirmación Parcial
 const confirmPartial = async (group) => {
+	const currencyLabel = group.primaryCurrency === "MXN" ? "MXN" : "USDT";
+	const totalDebt = group.primaryCurrency === "MXN" ? group.totalMxn : group.totalUsdt;
+	const formatFunc = group.primaryCurrency === "MXN" ? formatCurrency : formatUSDT;
+
 	const { value: amountStr } = await Swal.fire({
 		title: `Pago Parcial a ${group.counterparty}`,
-		html: `Deuda Total: ${formatUSDT(group.totalUsdt)}`,
+		html: `<p class="text-sm text-gray-500 mb-4">Deuda Total: <strong>${formatFunc(totalDebt)}</strong></p>
+               <p class="text-xs text-gray-400">Ingresa el monto en ${currencyLabel} que vas a descontar/pagar.</p>`,
 		input: "number",
 		inputAttributes: { step: "0.01" },
 		showCancelButton: true,
-		confirmButtonText: "Pagar",
+		confirmButtonText: "Aplicar Pago",
 	});
+
 	if (amountStr) {
-		const pay = parseFloat(amountStr);
-		let rem = pay;
+		const amountToPay = parseFloat(amountStr);
+		let remainingToPay = amountToPay;
+
 		try {
-			const sorted = [...group.transactions].sort((a, b) => a.timestamp - b.timestamp);
-			for (const tx of sorted) {
-				if (rem <= 0.001) break;
-				const txAmt = parseFloat(tx.amountUsdt);
-				if (rem >= txAmt) {
+			const sortedTxs = [...group.transactions].sort((a, b) => a.timestamp - b.timestamp);
+
+			for (const tx of sortedTxs) {
+				if (remainingToPay <= 0.001) break;
+
+				const isMxnTx = group.primaryCurrency === "MXN";
+				const txAmount = isMxnTx ? parseFloat(tx.amountMxn) : parseFloat(tx.amountUsdt);
+
+				if (remainingToPay >= txAmount) {
 					await confirmSinglePending(tx);
-					rem -= txAmt;
+					remainingToPay -= txAmount;
 				} else {
-					const newPend = txAmt - rem;
-					const newMxn = (tx.amountMxn / txAmt) * newPend;
-					await updateDoc(doc(db, "artifacts", appId, "users", user.value.uid, "transactions", tx.id), {
-						amountUsdt: newPend,
-						amountMxn: newMxn,
-					});
-					const paidMxn = tx.amountMxn - newMxn;
-					const comp = {
+					// SPLIT
+					const newPendingAmount = txAmount - remainingToPay;
+
+					// Actualizar original (pendiente)
+					const updatePayload = isMxnTx
+						? { amountMxn: newPendingAmount }
+						: { amountUsdt: newPendingAmount, amountMxn: (tx.amountMxn / txAmount) * newPendingAmount };
+
+					await updateDoc(doc(db, "artifacts", appId, "users", user.value.uid, "transactions", tx.id), updatePayload);
+
+					// Crear completada
+					const completedPayload = {
 						...tx,
-						amountUsdt: rem,
-						amountMxn: paidMxn,
 						status: "completed",
 						timestamp: Date.now(),
-						reference: `${tx.reference || ""} (P)`,
-						notes: "Pago parcial",
+						reference: `${tx.reference || ""} (Parcial)`,
+						notes: `Pago parcial`,
 					};
-					delete comp.id;
-					await addDoc(collection(db, "artifacts", appId, "users", user.value.uid, "transactions"), comp);
-					let sign = 0;
-					if (tx.type === "buy") sign = 1;
-					if (tx.type === "sell") sign = -1;
-					const w = findUsdtAccountByName(tx.platform);
-					if (w && sign !== 0) await updateAccountBalance(w.id, comp.amountUsdt, sign === 1 ? "add" : "subtract");
-					rem = 0;
+					delete completedPayload.id;
+
+					if (isMxnTx) {
+						completedPayload.amountMxn = remainingToPay;
+					} else {
+						completedPayload.amountUsdt = remainingToPay;
+						completedPayload.amountMxn = (tx.amountMxn / txAmount) * remainingToPay;
+					}
+
+					await addDoc(collection(db, "artifacts", appId, "users", user.value.uid, "transactions"), completedPayload);
+
+					// Impactar Saldo
+					if (tx.type === "service_charge") {
+						if (isMxnTx && tx.bankId) await updateAccountBalance(tx.bankId, completedPayload.amountMxn, "add");
+						else if (!isMxnTx && tx.platform) {
+							const w = findUsdtAccountByName(tx.platform);
+							if (w) await updateAccountBalance(w.id, completedPayload.amountUsdt, "add");
+						}
+					} else {
+						// P2P
+						let sign = 0;
+						if (tx.type === "buy") sign = 1;
+						if (tx.type === "sell") sign = -1;
+						const w = findUsdtAccountByName(tx.platform);
+						if (w && sign !== 0)
+							await updateAccountBalance(w.id, completedPayload.amountUsdt, sign === 1 ? "add" : "subtract");
+					}
+					remainingToPay = 0;
 				}
 			}
-			showSnackbar("Pago aplicado");
+			showSnackbar(`Pago parcial aplicado`);
 		} catch (e) {
+			console.error(e);
 			showSnackbar("Error", "error");
 		}
 	}
@@ -813,6 +897,7 @@ const renderIcons = () =>
 				LogOut,
 				Lock,
 				RefreshCcw,
+				Bell,
 			},
 			attrs: { class: "w-5 h-5" },
 		})
@@ -823,8 +908,14 @@ const formatCurrency = (val) => new Intl.NumberFormat("es-MX", { style: "currenc
 const formatUSDT = (val) => parseFloat(val).toFixed(2) + " ₮";
 const getBankName = (id) => accounts.value.find((a) => a.id === id)?.name || "N/A";
 const getTypeName = (type) =>
-	({ buy: "COMPRA", sell: "VENTA", deposit: "FONDEO", withdrawal: "GASTO", transfer_own: "TRASPASO" }[type] ||
-	type.toUpperCase());
+	({
+		buy: "COMPRA",
+		sell: "VENTA",
+		deposit: "FONDEO",
+		withdrawal: "GASTO",
+		transfer_own: "TRASPASO",
+		service_charge: "COBRO EXTRA",
+	}[type] || type.toUpperCase());
 const getBadgeColor = (type) =>
 	({
 		buy: "bg-indigo-100 text-indigo-700",
@@ -832,6 +923,7 @@ const getBadgeColor = (type) =>
 		transfer_own: "bg-purple-100 text-purple-700",
 		deposit: "bg-teal-100 text-teal-700",
 		withdrawal: "bg-rose-100 text-rose-700",
+		service_charge: "bg-amber-100 text-amber-700",
 	}[type] || "bg-gray-100 text-gray-600");
 </script>
 
@@ -940,17 +1032,24 @@ const getBadgeColor = (type) =>
 			</nav>
 
 			<main class="container mx-auto p-4 md:p-6 space-y-6">
-				<!-- ALERT SI NO HAY CUENTAS -->
+				<!-- ALERTA DE COBROS PENDIENTES -->
 				<div
-					v-if="accounts.length === 0 && activeTab !== 'accounts'"
-					class="bg-blue-50 border border-blue-200 p-4 rounded-lg flex items-center gap-3 animate-fade-in"
+					v-if="pendingCharges.length > 0 && activeTab === 'dashboard'"
+					class="bg-amber-100 border-l-4 border-amber-500 p-4 rounded-r shadow-md animate-pulse-slow"
 				>
-					<i data-lucide="alert-circle" class="text-blue-500"></i>
-					<div>
-						<h3 class="font-bold text-blue-800">¡Bienvenido!</h3>
-						<p class="text-sm text-blue-600">
-							Empieza configurando tus cuentas y clientes en la pestaña <strong>Catálogos</strong>.
-						</p>
+					<div class="flex items-start gap-3">
+						<i data-lucide="bell" class="text-amber-600 w-6 h-6 mt-1"></i>
+						<div class="flex-1">
+							<h3 class="font-bold text-amber-800 mb-1">¡Recordatorio de Cobros!</h3>
+							<p class="text-sm text-amber-700 mb-2">
+								Tienes {{ pendingCharges.length }} cobros de servicios/extras pendientes por descontar:
+							</p>
+							<ul class="list-disc list-inside text-xs text-amber-800 font-mono">
+								<li v-for="tx in pendingCharges" :key="tx.id">
+									{{ tx.counterparty }}: {{ tx.amountMxn ? formatCurrency(tx.amountMxn) : formatUSDT(tx.amountUsdt) }}
+								</li>
+							</ul>
+						</div>
 					</div>
 				</div>
 
@@ -1129,19 +1228,31 @@ const getBadgeColor = (type) =>
 											<div class="flex items-center gap-2 text-xs text-gray-500">
 												<span
 													:class="
-														group.type === 'buy'
+														group.type === 'service_charge'
+															? 'text-amber-600 bg-amber-50 px-2 rounded'
+															: group.type === 'buy'
 															? 'text-indigo-600 bg-indigo-50 px-2 rounded'
 															: 'text-emerald-600 bg-emerald-50 px-2 rounded'
 													"
 												>
-													{{ group.type === "buy" ? "POR COBRAR" : "POR PAGAR" }}
+													{{
+														group.type === "service_charge"
+															? "COBRO EXTRA"
+															: group.type === "buy"
+															? "POR COBRAR"
+															: "POR PAGAR"
+													}}
 												</span>
 												<span>• {{ group.count }} movs</span>
 											</div>
 										</div>
 										<div class="text-right">
-											<div class="font-mono text-xl font-bold text-gray-800">{{ formatUSDT(group.totalUsdt) }}</div>
-											<div class="text-xs text-gray-400">{{ formatCurrency(group.totalMxn) }} MXN</div>
+											<div class="font-mono text-xl font-bold text-gray-800">
+												{{ group.totalUsdt > 0 ? formatUSDT(group.totalUsdt) : formatCurrency(group.totalMxn) }}
+											</div>
+											<div class="text-xs text-gray-400">
+												{{ group.primaryCurrency === "USDT" ? "Principal: USDT" : "Principal: MXN" }}
+											</div>
 										</div>
 									</div>
 
@@ -1150,7 +1261,8 @@ const getBadgeColor = (type) =>
 											@click="confirmGroup(group)"
 											class="flex-1 bg-slate-800 hover:bg-slate-700 text-white py-2 rounded text-sm flex items-center justify-center gap-2"
 										>
-											<i data-lucide="check-circle" class="w-4 h-4"></i> OK TODO
+											<i data-lucide="check-circle" class="w-4 h-4"></i>
+											{{ group.type === "service_charge" ? "COBRADO" : "OK TODO" }}
 										</button>
 										<button
 											@click="confirmPartial(group)"
@@ -1278,11 +1390,14 @@ const getBadgeColor = (type) =>
 						<div class="grid grid-cols-2 gap-4">
 							<div class="space-y-2">
 								<label class="text-xs font-bold text-gray-500 uppercase">Tipo</label>
-								<select v-model="form.type" class="w-full p-2 border border-gray-300 rounded-lg">
+								<select v-model="form.type" class="w-full p-2 border border-gray-300 rounded-lg font-bold">
 									<option value="buy">Comprar USDT</option>
 									<option value="sell">Vender USDT</option>
 									<option value="transfer_own" class="bg-indigo-50 font-bold text-indigo-800">
 										Mover Saldo entre Mis Cuentas
+									</option>
+									<option value="service_charge" class="bg-amber-100 font-bold text-amber-800">
+										Cobro Servicio / Extra
 									</option>
 								</select>
 							</div>
@@ -1302,20 +1417,22 @@ const getBadgeColor = (type) =>
 							<label class="text-xs font-bold text-gray-500 uppercase">Método de Salida</label>
 							<div class="grid grid-cols-2 gap-4">
 								<label
-									class="flex flex-col items-center justify-center gap-1 border rounded-lg p-2 cursor-pointer hover:bg-gray-50"
+									class="flex items-center gap-2 border rounded-lg p-2 cursor-pointer hover:bg-gray-50"
 									:class="{ 'border-indigo-500 bg-indigo-50': form.paymentMethod === 'transfer' }"
 								>
-									<input type="radio" value="transfer" v-model="form.paymentMethod" class="hidden" />
-									<i data-lucide="arrow-up-right" class="w-5 h-5 text-indigo-600"></i>
-									<span class="text-xs font-medium text-gray-700">Transferencia</span>
+									<input type="radio" value="transfer" v-model="form.paymentMethod" class="text-indigo-600" />
+									<div class="flex items-center gap-2 text-xs sm:text-sm font-medium text-gray-700">
+										<i data-lucide="arrow-up-right" class="w-4 h-4"></i> Transferencia
+									</div>
 								</label>
 								<label
-									class="flex flex-col items-center justify-center gap-1 border rounded-lg p-2 cursor-pointer hover:bg-gray-50"
+									class="flex items-center gap-2 border rounded-lg p-2 cursor-pointer hover:bg-gray-50"
 									:class="{ 'border-red-500 bg-red-50': form.paymentMethod === 'cash_withdrawal' }"
 								>
-									<input type="radio" value="cash_withdrawal" v-model="form.paymentMethod" class="hidden" />
-									<i data-lucide="smartphone" class="w-5 h-5 text-red-600"></i>
-									<span class="text-xs font-medium text-gray-700">Retiro Efectivo</span>
+									<input type="radio" value="cash_withdrawal" v-model="form.paymentMethod" class="text-red-600" />
+									<div class="flex items-center gap-2 text-xs sm:text-sm font-medium text-gray-700">
+										<i data-lucide="smartphone" class="w-4 h-4"></i> Retiro Efectivo
+									</div>
 								</label>
 							</div>
 						</div>
@@ -1365,7 +1482,7 @@ const getBadgeColor = (type) =>
 							</div>
 						</div>
 
-						<!-- FORMULARIO STANDARD -->
+						<!-- FORMULARIO STANDARD / COBRO -->
 						<div v-else>
 							<div
 								v-if="form.type === 'buy'"
@@ -1423,7 +1540,7 @@ const getBadgeColor = (type) =>
 								</div>
 							</div>
 							<div class="bg-slate-50 p-4 rounded-lg border border-slate-200 space-y-4">
-								<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+								<div v-if="form.type !== 'service_charge'" class="grid grid-cols-1 md:grid-cols-2 gap-4">
 									<div class="space-y-1">
 										<label class="text-xs font-bold text-gray-500 uppercase">Cuenta MXN</label>
 										<select
@@ -1447,6 +1564,47 @@ const getBadgeColor = (type) =>
 											required
 											class="w-full p-2 border border-gray-300 rounded-lg font-bold"
 										/>
+									</div>
+								</div>
+
+								<!-- CAMPOS ESPECÍFICOS DE SERVICIO: AHORA CON SELECTOR DE CUENTA -->
+								<div v-if="form.type === 'service_charge'" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+									<!-- OPCIÓN A: COBRO EN PESOS -->
+									<div class="space-y-2 border-r border-gray-200 pr-2">
+										<label class="text-xs font-bold text-blue-600 uppercase">Opción A: Cobro en MXN</label>
+										<input
+											type="number"
+											step="0.01"
+											v-model="form.amountMxn"
+											placeholder="Monto"
+											class="w-full p-2 border border-gray-300 rounded-lg font-bold mb-2"
+										/>
+										<select
+											v-model="form.bankId"
+											class="w-full p-2 border border-gray-300 rounded-lg bg-white text-xs"
+										>
+											<option value="" disabled selected>Destino (Banco)</option>
+											<option v-for="acc in mxnAccounts" :key="acc.id" :value="acc.id">{{ acc.name }}</option>
+										</select>
+									</div>
+
+									<!-- OPCIÓN B: COBRO EN USDT -->
+									<div class="space-y-2 pl-2">
+										<label class="text-xs font-bold text-emerald-600 uppercase">Opción B: Cobro en USDT</label>
+										<input
+											type="number"
+											step="0.01"
+											v-model="form.amountUsdt"
+											placeholder="Monto"
+											class="w-full p-2 border border-gray-300 rounded-lg font-bold mb-2"
+										/>
+										<select
+											v-model="form.platform"
+											class="w-full p-2 border border-gray-300 rounded-lg bg-white text-xs"
+										>
+											<option value="" disabled selected>Destino (Wallet)</option>
+											<option v-for="acc in usdtAccounts" :key="acc.id" :value="acc.name">{{ acc.name }}</option>
+										</select>
 									</div>
 								</div>
 

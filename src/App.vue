@@ -165,15 +165,23 @@ onMounted(() => {
 	});
 });
 
-// NUEVO: Función de Login con Google
+// NUEVO: Función de Login con Google Mejorada
 const handleLogin = async () => {
 	const provider = new GoogleAuthProvider();
 	try {
 		await signInWithPopup(auth, provider);
 		showSnackbar("Bienvenido");
 	} catch (error) {
-		console.error(error);
-		showSnackbar("Error al conectar con Google", "error");
+		console.error("Error Login:", error);
+		let msg = "Error al conectar con Google";
+
+		// Manejo de errores comunes
+		if (error.code === "auth/popup-closed-by-user") msg = "Ventana cerrada antes de terminar";
+		if (error.code === "auth/cancelled-popup-request") msg = "Solicitud cancelada";
+		if (error.code === "auth/popup-blocked") msg = "El navegador bloqueó la ventana (permite popups)";
+		if (error.code === "auth/unauthorized-domain") msg = "⚠️ Dominio no autorizado en Firebase Console";
+
+		showSnackbar(msg, "error");
 	}
 };
 

@@ -177,6 +177,7 @@ const handleLogin = async () => {
 		console.error("Error Login:", error);
 		let msg = "Error al conectar con Google";
 		if (error.code === "auth/popup-closed-by-user") msg = "Ventana cerrada antes de terminar";
+		if (error.code === "auth/cancelled-popup-request") msg = "Solicitud cancelada";
 		if (error.code === "auth/popup-blocked") msg = "El navegador bloqueó la ventana (permite popups)";
 		if (error.code === "auth/unauthorized-domain") msg = "⚠️ Dominio no autorizado en Firebase Console";
 		showSnackbar(msg, "error");
@@ -215,6 +216,7 @@ const initDataListeners = (userId) => {
 				.map((d) => ({ id: d.id, ...d.data() }))
 				.sort((a, b) => new Date(b.date) - new Date(a.date) || b.timestamp - a.timestamp))
 	);
+	// Ordenar cierres por fecha descendente
 	onSnapshot(
 		query(
 			collection(db, "artifacts", appId, "users", userId, "daily_closes"),
@@ -260,6 +262,7 @@ watch(
 
 const totalMxn = computed(() => mxnAccounts.value.reduce((sum, acc) => sum + (acc.balance || 0), 0));
 const totalUsdtWallet = computed(() => usdtAccounts.value.reduce((sum, acc) => sum + (acc.balance || 0), 0));
+// Capital Total = MXN en Bancos + (USDT en Wallets * TC Cobertura)
 const totalEquity = computed(() => totalMxn.value + totalUsdtWallet.value * targetBuyRate.value);
 
 const usdtOwedToClients = computed(() =>
@@ -297,23 +300,18 @@ const monthlyStats = computed(() => {
 	return { funded, expenses };
 });
 
+// CAMBIO: Lógica de Ganancia Simplificada (Variación de Patrimonio)
+// Ganancia = Capital Total Hoy - Capital Total Ayer (Cierre)
 const dailyProfit = computed(() => {
+	// Buscar el último cierre (que no sea el de ahora mismo si acabamos de cerrar)
 	const lastClose = dailyCloses.value.length > 0 ? dailyCloses.value[0] : null;
 	const lastEquity = lastClose ? lastClose.totalEquity : 0;
-	const todayStr = new Date().toISOString().split("T")[0];
-	const todayCapitalTxs = transactions.value.filter(
-		(tx) => tx.date === todayStr && (tx.type === "deposit" || tx.type === "withdrawal")
-	);
-	let todayFunding = 0,
-		todayExpenses = 0;
-	todayCapitalTxs.forEach((tx) => {
-		let val = tx.amountMxn;
-		if (!val && tx.amountUsdt) val = tx.amountUsdt * targetBuyRate.value;
-		if (tx.type === "deposit") todayFunding += val;
-		if (tx.type === "withdrawal") todayExpenses += val;
-	});
+
+	// Si no hay cierre previo, asumimos ganancia 0 o base 0
 	if (!lastClose) return 0;
-	return totalEquity.value - lastEquity - todayFunding + todayExpenses;
+
+	// Resta simple: Capital Actual - Capital Anterior
+	return totalEquity.value - lastEquity;
 });
 
 const pendingCharges = computed(() => {
@@ -335,6 +333,7 @@ const groupedPending = computed(() => {
 				totalMxn: 0,
 				transactions: [],
 				primaryCurrency: "USDT",
+				averageRate: 0,
 			};
 		}
 		groups[key].count++;
@@ -348,7 +347,16 @@ const groupedPending = computed(() => {
 			groups[key].primaryCurrency = "USDT";
 		}
 	});
-	return Object.values(groups).sort((a, b) => b.totalUsdt - a.totalUsdt);
+
+	// Calcular TC Promedio
+	return Object.values(groups)
+		.map((g) => {
+			if (g.totalUsdt > 0 && g.totalMxn > 0) {
+				g.averageRate = (g.totalMxn / g.totalUsdt).toFixed(4);
+			}
+			return g;
+		})
+		.sort((a, b) => b.totalUsdt - a.totalUsdt);
 });
 
 // --- LOGIC ACTIONS ---
@@ -423,10 +431,14 @@ const deleteCounterparty = async (id) => {
 	}
 };
 
+// UPDATE BALANCE SEGURO
 const updateAccountBalance = async (id, amount, op) => {
 	if (!id) return;
+	const val = parseFloat(amount);
+	if (isNaN(val)) return;
+
 	await updateDoc(doc(db, "artifacts", appId, "users", user.value.uid, "accounts", id), {
-		balance: increment(op === "add" ? Math.abs(amount) : -Math.abs(amount)),
+		balance: increment(op === "add" ? Math.abs(val) : -Math.abs(val)),
 	});
 };
 const findUsdtAccountByName = (name) =>
@@ -441,11 +453,8 @@ const applyBalanceEffect = async (tx, reverse = false) => {
 		return;
 	}
 
-	// COBROS EXTRA (Service Charge)
 	if (tx.type === "service_charge") {
 		if (tx.status === "completed") {
-			// Al completar un cobro, recibimos dinero -> SUMA
-			// Si revertimos (borramos), -> RESTA
 			const op = reverse ? "subtract" : "add";
 			if (tx.amountMxn > 0 && tx.bankId) {
 				await updateAccountBalance(tx.bankId, tx.amountMxn, op);
@@ -457,12 +466,18 @@ const applyBalanceEffect = async (tx, reverse = false) => {
 		return;
 	}
 
+	// Lógica P2P Estándar
 	let mxnSign = 0;
+	// Buy (Compro USDT / Egreso MXN) -> Resta MXN
 	if (tx.type === "buy" || tx.type === "withdrawal") mxnSign = -1;
+	// Sell (Vendo USDT / Ingreso MXN) -> Suma MXN
 	if (tx.type === "sell" || tx.type === "deposit") mxnSign = 1;
+
 	if (reverse) mxnSign *= -1;
-	if (tx.bankId && mxnSign !== 0)
+
+	if (tx.bankId && mxnSign !== 0) {
 		await updateAccountBalance(tx.bankId, tx.amountMxn, mxnSign === 1 ? "add" : "subtract");
+	}
 
 	let usdtSign = 0;
 	if (tx.status === "completed") {
@@ -470,6 +485,7 @@ const applyBalanceEffect = async (tx, reverse = false) => {
 		if (tx.type === "sell") usdtSign = -1;
 	}
 	if (reverse) usdtSign *= -1;
+
 	if (tx.platform && usdtSign !== 0) {
 		const w = findUsdtAccountByName(tx.platform);
 		if (w) await updateAccountBalance(w.id, tx.amountUsdt, usdtSign === 1 ? "add" : "subtract");
@@ -479,7 +495,6 @@ const applyBalanceEffect = async (tx, reverse = false) => {
 const handleTransactionSubmit = async () => {
 	if (!user.value) return;
 
-	// Validación Wallet USDT
 	if (
 		(form.value.type === "buy" ||
 			form.value.type === "sell" ||
@@ -509,7 +524,7 @@ const handleTransactionSubmit = async () => {
 	}
 
 	let initialStatus = form.value.isPending ? "pending" : "completed";
-	if (form.value.type === "service_charge") initialStatus = "pending"; // Servicios nacen pendientes
+	if (form.value.type === "service_charge") initialStatus = "pending";
 
 	if (isEditing.value && editingId.value) {
 		const oldTx = transactions.value.find((t) => t.id === editingId.value);
@@ -530,12 +545,14 @@ const handleTransactionSubmit = async () => {
 	try {
 		if (isEditing.value) {
 			await updateDoc(doc(db, "artifacts", appId, "users", user.value.uid, "transactions", editingId.value), txData);
-			showSnackbar("Actualizado");
+			await applyBalanceEffect(txData, false);
+			showSnackbar("Actualizado y saldos recalculados");
 		} else {
 			await addDoc(collection(db, "artifacts", appId, "users", user.value.uid, "transactions"), txData);
-			applyBalanceEffect(txData, false);
+			await applyBalanceEffect(txData, false);
 			showSnackbar("Registrado");
 		}
+
 		if (form.value.type === "sell") resetForm("partial");
 		else resetForm("full");
 	} catch (e) {
@@ -601,7 +618,7 @@ const deleteTransaction = async (id) => {
 				await applyBalanceEffect(tx, true);
 			}
 			await deleteDoc(doc(db, "artifacts", appId, "users", user.value.uid, "transactions", id));
-			showSnackbar("Eliminado");
+			showSnackbar("Eliminado y saldos ajustados");
 		} catch (e) {
 			showSnackbar("Error", "error");
 		}
@@ -648,11 +665,9 @@ const confirmSinglePending = async (tx) => {
 
 		if (tx.type === "service_charge") {
 			if (tx.amountMxn > 0 && tx.bankId) {
-				// Completar cobro MXN -> Sumar a Banco
 				await updateAccountBalance(tx.bankId, tx.amountMxn, "add");
 			} else if (tx.amountUsdt > 0 && tx.platform) {
 				const wService = findUsdtAccountByName(tx.platform);
-				// Completar cobro USDT -> Sumar a Wallet
 				if (wService) await updateAccountBalance(wService.id, tx.amountUsdt, "add");
 			}
 		}
@@ -719,14 +734,12 @@ const confirmPartial = async (group) => {
 					// SPLIT
 					const newPendingAmount = txAmount - remainingToPay;
 
-					// Actualizar original (pendiente)
 					const updatePayload = isMxnTx
 						? { amountMxn: newPendingAmount }
 						: { amountUsdt: newPendingAmount, amountMxn: (tx.amountMxn / txAmount) * newPendingAmount };
 
 					await updateDoc(doc(db, "artifacts", appId, "users", user.value.uid, "transactions", tx.id), updatePayload);
 
-					// Crear completada
 					const completedPayload = {
 						...tx,
 						status: "completed",
@@ -1244,6 +1257,13 @@ const getBadgeColor = (type) =>
 													}}
 												</span>
 												<span>• {{ group.count }} movs</span>
+											</div>
+											<!-- NUEVO: Mostrar TC Promedio del grupo -->
+											<div
+												v-if="group.averageRate > 0 && group.primaryCurrency === 'USDT'"
+												class="text-[10px] text-gray-400 font-mono mt-1"
+											>
+												TC Promedio: ${{ group.averageRate }}
 											</div>
 										</div>
 										<div class="text-right">
